@@ -48,4 +48,4 @@ def predict_step(tokenized_en, tokenized_text):
     return prediction, tokenized_en
 
 
-predict('Beraber bir gelecek hayal et')
+predict('Birlikte olacağımız bir gelecek hayal et')

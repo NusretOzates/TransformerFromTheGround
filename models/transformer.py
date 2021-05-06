@@ -102,8 +102,7 @@ class Transformer(tf.keras.Model):
         mask = self.calculate_masked_loss(tar_real)
 
         preds = self([inp, target], True)
-        loss = self.compiled_loss(tar_real, preds) * mask
-        loss = tf.reduce_sum(loss) / tf.reduce_sum(mask)
+        loss = self.compiled_loss(tar_real, preds, sample_weight=mask) / tf.reduce_sum(mask)
 
         val_loss.update_state(loss)
         val_accuracy.update_state(self.accuracy_function(tar_real, preds))

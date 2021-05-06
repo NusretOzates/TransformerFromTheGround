@@ -4,20 +4,23 @@ import tensorflow as tf
 from tensorflow.python.ops.gen_dataset_ops import PrefetchDataset
 from tokenizers import BertWordPieceTokenizer
 from transformers import BertTokenizerFast
+
+from losses.transformer_loss import TransformerLoss
 from models.transformer import Transformer
 from utilities import filter_max_length
 
 BUFFER_SIZE = 20000
 BATCH_SIZE = 32
-EPOCH = 1
+EPOCH = 7
 # Hyperparameters
 
-num_layers = 2
-d_model = 128
-dff = 64
-num_heads = 1
+num_layers = 6
+d_model = 512
+dff = 1024
+num_heads = 8
 dropout_rate = 0.1
 
+# Just to eliminate GPU based errors
 config = tf.compat.v1.ConfigProto()
 config.gpu_options.allow_growth = True
 tf.compat.v1.InteractiveSession(config=config)
@@ -25,9 +28,8 @@ tf.compat.v1.InteractiveSession(config=config)
 print("Loading data")
 # Use tffs English-Turkish Dataset
 examples, metadata = tfds.load('ted_hrlr_translate/tr_to_en', with_info=True, as_supervised=True,
-                               split=['train[:1000]', 'validation[:1000]', 'test[:1000]'])
+                               split=['train', 'validation', 'test'])
 train, val, test = examples[0], examples[1], examples[2]
-
 
 # tokenizer_tr = BertWordPieceTokenizer('turkish-tokenizer-vocab.txt', clean_text=False, lowercase=False)
 # tokenizer_en = BertWordPieceTokenizer('english-tokenizer-vocab.txt', clean_text=False, lowercase=False)
@@ -43,10 +45,13 @@ vocab_size_output = tokenizer_en.vocab_size
 
 
 def encode(tr, en):
+    # Convert from tensor to text
     tr_text = tf.compat.as_text(tr.numpy()).lower()
     en_text = tf.compat.as_text(en.numpy()).lower()
+    # Encode using the tokenizer
     tr = tokenizer_tr.encode(tr_text)
     en = tokenizer_en.encode(en_text)
+    # Convert to tensor again
     tr = tf.constant(tr, dtype=tf.int32)
     en = tf.constant(en, dtype=tf.int32)
 
@@ -64,22 +69,25 @@ def tf_encode(tr, en):
 print('Encode Dataset')
 train_dataset: PrefetchDataset = train.map(tf_encode,
                                            deterministic=tf.data.Options.experimental_deterministic)
+
+# Filter by length to reduce training duration!
 train_dataset = train_dataset.filter(filter_max_length)
 
-train_dataset = train_dataset.cache()
-train_dataset = train_dataset.shuffle(BUFFER_SIZE).padded_batch(BATCH_SIZE)
-train_dataset = train_dataset.prefetch(tf.data.experimental.AUTOTUNE)
+# Optimize the data pipeline, padded batch means all data in the mini-batch will be same size
+train_dataset = train_dataset.cache().shuffle(BUFFER_SIZE).padded_batch(BATCH_SIZE).prefetch(
+    tf.data.experimental.AUTOTUNE)
 
 val_dataset = val.map(tf_encode,
-                      deterministic=tf.data.Options.experimental_deterministic)
-val_dataset = val_dataset.filter(filter_max_length).cache().padded_batch(BATCH_SIZE)
+                      deterministic=tf.data.Options.experimental_deterministic).filter(
+    filter_max_length).cache().padded_batch(BATCH_SIZE)
+
 
 print('Create Optimizer etc.')
 optimizer = tf.keras.optimizers.Adam(beta_1=0.9, beta_2=0.98, epsilon=1e-9)
 sgd = tf.keras.optimizers.SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True)
 loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='sum')
 
-
+# We need it to use it in custom fit function
 end_of_sentence = tokenizer_en.convert_tokens_to_ids(['[SEP]'])
 end_of_sentence = tf.convert_to_tensor([end_of_sentence], dtype=tf.int32)
 
@@ -91,18 +99,24 @@ transformer = Transformer(num_layers, d_model, num_heads, dff,
                           pe_target=vocab_size_output,
                           rate=dropout_rate)
 
-# checkpoint_path = './checkpoints/train'
-# ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
-# ckpt_manager = tf.train.CheckpointManager(ckpt, checkpoint_path, max_to_keep=5)
-#
-# if ckpt_manager.latest_checkpoint:
-#     ckpt.restore(ckpt_manager.latest_checkpoint)
-#     print('Latest Checkpoint restored!!')
+# Create a checkpoint
+checkpoint_path = './checkpoints/train'
+ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
+ckpt_manager = tf.train.CheckpointManager(ckpt, checkpoint_path, max_to_keep=5)
+
+if ckpt_manager.latest_checkpoint:
+    ckpt.restore(ckpt_manager.latest_checkpoint)
+    print('Latest Checkpoint restored!!')
 
 transformer.compile(optimizer=sgd, loss=loss_object, metrics='accuracy', run_eagerly=False)
 transformer.fit(train_dataset, validation_data=val_dataset, epochs=EPOCH)
 transformer.save('saved_tf', save_format='tf')
+ckpt_save_path = ckpt_manager.save()
+
 print('saved')
+
+
+
 """
 The @tf.function trace-compiles train_step into a TF graph for faster execution.
 The function specialized to the precise shape of the argument tensors. To avoid
@@ -199,5 +213,3 @@ batch is smaller), use input_signature to specify more generic shape
 #                 break
 #
 #         print(tokenizer_en.decode(tokenized_en.numpy().tolist()[0], skip_special_tokens=False))
-
-
